@@ -63,8 +63,16 @@ sudo rm -rf "${workdir}"
 mkdir -p "${workdir}" "${rootfs}" "${mnt}" "${esp}" "${data_mnt}"
 
 echo "[2/10] Bootstrap Ubuntu ${DIST} with mmdebstrap"
+# TODO: Experiment - light: 
+  #  --include=linux-image-virtual,casper,ca-certificates,iproute2,iputils-ping,less,initramfs-tools \
+# heavy: 
+#   --include=linux-image-generic,casper,squashfs-tools,ca-certificates,iproute2,iputils-ping,net-tools,less,vim,ubuntu-standard,initramfs-tools,console-setup,keyboard-configuration \
+
+# added:
+#   netplan.io (for modern network config)
+
 sudo mmdebstrap --variant=minbase \
-  --include=linux-image-generic,casper,squashfs-tools,ca-certificates,iproute2,iputils-ping,net-tools,less,vim,ubuntu-standard,initramfs-tools,console-setup,keyboard-configuration \
+  --include=linux-image-generic,casper,squashfs-tools,ca-certificates,iproute2,iputils-ping,net-tools,netplan.io,less,vim,ubuntu-standard,initramfs-tools,console-setup,keyboard-configuration \
   --components="main restricted universe multiverse" \
   "${DIST}" "${rootfs}" \
   "${MIRROR}"
@@ -102,9 +110,22 @@ sudo tee "${rootfs}/etc/hosts" >/dev/null <<EOF
 ff02::1     ip6-allnodes
 ff02::2     ip6-allrouters
 EOF
+
+sudo mkdir -p "${rootfs}/etc/netplan"
+sudo touch "${rootfs}/etc/netplan/01-net.yaml"
+sudo tee "${rootfs}/etc/netplan/01-net.yaml" >/dev/null <<EOF
+network:
+  version: 2
+  ethernets:
+    all-nics:
+      match:
+        name: "e*"
+      dhcp4: true
+      optional: true
+EOF
+
 sudo chroot "${rootfs}" bash -lc "echo 'root:${ROOTPWD}' | chpasswd"
 
-# Configure initramfs to include casper hooks
 # Configure initramfs to include casper hooks and set compression
 sudo chroot "${rootfs}" bash -lc "echo 'COMPRESS=xz' >> /etc/initramfs-tools/initramfs.conf"
 sudo chroot "${rootfs}" bash -lc "echo 'MODULES=most' >> /etc/initramfs-tools/initramfs.conf"
@@ -135,6 +156,12 @@ test -f "${KERNEL}" && test -f "${INITRD}"
 echo "[4/10] Build squashfs"
 sudo mksquashfs "${rootfs}" "${squash}" -comp xz -wildcards \
   -e 'proc/*' 'sys/*' 'dev/*' 'run/*' 'tmp/*' 'var/tmp/*' 'var/cache/apt/archives/*'
+
+# TODO: Experiment with more aggressive exclusions
+# sudo mksquashfs "${rootfs}" "${squash}" -comp xz -b 1M -Xdict-size 100% -wildcards \
+#   -e 'proc/*' 'sys/*' 'dev/*' 'run/*' 'tmp/*' 'var/tmp/*' 'var/cache/apt/archives/*' \
+#      'usr/share/doc/*' 'usr/share/man/*' 'usr/share/locale/*' 'usr/share/info/*' \
+#      'var/lib/apt/lists/*'
 sudo chown "$(id -u)":"$(id -g)" "${squash}"
 
 echo "[5/10] Create GPT image and partitions"
@@ -235,9 +262,6 @@ sudo umount -R "${data_mnt}" "${esp}" "${mnt}"
 sudo losetup -d "${LOOPDEV}"
 trap - EXIT
 
-# Convert to VHDX (uncomment if needed)
-# qemu-img convert -O vhdx "${IMG}" "${VHDX}"
-
 echo
 echo "Built:"
 echo "  Raw : ${IMG}"
@@ -247,5 +271,10 @@ echo "QEMU (console):"
 echo "  qemu-system-x86_64 -m 2048 -machine q35,accel=kvm \\
         -drive file=${IMG},format=raw,if=virtio -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd -nographic"
 echo
+echo "Hyper-V Convert to VHDX (for Hyper-V Gen2)"
+echo "qemu-img convert -O vhdx ${IMG} ${VHDX}"
+
+qemu-img convert -O vhdx "${IMG}" "${VHDX}"
+
 echo "Hyper-V Gen2: attach ${VHDX} as a SCSI disk on a Gen2 VM (UEFI)."
 echo "Disable Secure Boot for quick testing, or install shim/grub signed if needed."
